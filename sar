@@ -1,0 +1,171 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Digest::SHA1 qw(sha1_hex);
+use File::Path qw(make_path);
+use File::Spec;
+use File::Basename;
+use Fcntl qw(SEEK_SET SEEK_CUR SEEK_END);
+use Getopt::Std;
+
+our $opt_m; # mode
+
+getopts('m:');
+
+if (!defined($opt_m)) {
+	die "Need '-m <mode>' where <mode> is one of: t (test), x (extract), c (create)";
+}
+
+# Configuration
+my $block_size = 8 * 1024;
+my $archive_dir = '/nhome/todd/sarchive';
+my $hashes_dir = $archive_dir . "/hashes";
+
+# Create archive dir if it doesn't exist
+make_path($archive_dir) unless -d $archive_dir;
+make_path($hashes_dir) unless -d $hashes_dir;
+
+if ($opt_m eq "c") {
+	foreach my $path (@ARGV) {
+		print "Processing $path\n";
+		if (-f $path) {
+			my $sha = archive_file($path);
+			print $sha . "\n";
+			next;
+		}
+		#if (-d $path) {
+		#	process_dir($path);
+		#	next;
+		#}
+	}
+	exit(0);
+}
+
+if ($opt_m eq "x") {
+	foreach my $sha (@ARGV) {
+		print "Extracting $sha\n";
+		restore_file($sha);
+	}
+	exit(0);
+}
+
+# types of blocks
+# dir -> file metadata + pointer
+# pointer -> list of blocks
+# data -> contents of file
+
+
+sub archive_file {
+    my ($file_path) = @_;
+    my $file_size = -s $file_path;
+    my $file_name = basename($file_path);
+    my $file_hpath = sha1_hex($file_path);
+    my @blocks = ();
+    
+    open(my $in_fh, '<', $file_path) or die "Cannot open $file_path: $!";
+    binmode($in_fh);
+    
+    my $block_count = int($file_size / $block_size);
+    $block_count++ if $file_size % $block_size != 0;
+    
+    for my $block_index (0..$block_count-1) {
+        my $block_offset = $block_index * $block_size;
+        my $block_size_to_read = ($block_index == $block_count - 1) ? ($file_size % $block_size) : $block_size;
+        
+        seek($in_fh, $block_offset, SEEK_SET) or die "Cannot seek in $file_path: $!";
+        read($in_fh, my $block_data, $block_size_to_read) or die "Cannot read from $file_path: $!";
+
+	my $block_hash = store_block($block_data);        
+
+        push @blocks, $block_hash;
+    }
+    
+    close($in_fh);
+
+    my $sha = make_pointer_blocks(@blocks);
+
+    my $data = "file:$file_path\n";
+    $data .= "ptr:$sha\n";
+
+    return store_block(mkheader("dir", $data));
+}
+
+sub store_block {
+	my ($block_data) = @_;
+        my $block_hash = sha1_hex($block_data);
+        my $block_archive_path = File::Spec->catfile($hashes_dir, $block_hash);
+        print "block $block_archive_path\n";
+        if (!-e $block_archive_path) {
+            open(my $block_out_fh, '>', $block_archive_path) or die "Cannot create $block_archive_path: $!";
+            binmode($block_out_fh);
+            print $block_out_fh $block_data;
+            close($block_out_fh);
+        }
+	return $block_hash;
+}
+
+sub mkheader {
+	my ($type, $data) = @_;
+	my $str = "sartype:$type\n";
+	$str .= $data;
+	return $str;
+}
+
+sub make_pointer_blocks {
+	my (@blist) = @_;
+	my $hdrsize = length(mkheader("ptr",""));
+	my $size = $hdrsize;
+	my $data = "";
+	my $line;
+	my @blocks = ();
+
+	print "make_pointer_blocks: $#blist\n";
+
+	foreach my $block (@blist) {
+		if ( (length($block) + $size) > $block_size) {
+			push @blocks, store_block(mkheader("ptr",$data));
+			$data = "";
+			$size = $hdrsize;
+		}
+		my $str = $block . "\n";
+		$data .= $str;
+		$size += length($str);
+	}
+	if (length($data) > 0) {
+		push @blocks, store_block(mkheader("ptr", $data));
+	}
+	if ($#blocks > 0) {
+		return make_pointer_blocks(@blocks);
+	}
+	return $blocks[0];
+}
+
+sub restore_file {
+    my ($archive_path) = @_;
+    my $file_name = basename($archive_path);
+    my $restored_file_path = File::Spec->catfile($archive_dir, $file_name . '.restored');
+    
+    open(my $in_fh, '<', $archive_path) or die "Cannot open $archive_path: $!";
+    binmode($in_fh);
+    
+    open(my $out_fh, '>', $restored_file_path) or die "Cannot create $restored_file_path: $!";
+    binmode($out_fh);
+    
+    while (my $line = <$in_fh>) {
+        chomp($line);
+        my $block_hash = $line;
+        my $block_archive_path = File::Spec->catfile($archive_dir, $block_hash);
+        
+        open(my $block_in_fh, '<', $block_archive_path) or die "Cannot open $block_archive_path: $!";
+	binmode($block_in_fh);
+	    my $block_data;
+    read($block_in_fh, $block_data, $block_size) or die "Cannot read from $block_archive_path: $!";
+    print $out_fh $block_data;
+    }
+
+    close($in_fh);
+    close($out_fh);
+
+    return $restored_file_path;
+}
