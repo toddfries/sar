@@ -70,6 +70,9 @@ if ($opt_m eq "x") {
 # data -> contents of file
 
 
+# XXX need to create pointers on the fly vs after all data blocks
+#  700mb file took over 15mb of memory
+
 sub archive_file {
     my ($file_path) = @_;
     my $file_size = -s $file_path;
