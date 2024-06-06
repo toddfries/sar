@@ -19,17 +19,31 @@ use warnings;
 use Digest::SHA1 qw(sha1_hex);
 use File::Path qw(make_path);
 use File::Spec;
+use File::Slurp;
 use File::Basename;
 use Fcntl qw(SEEK_SET SEEK_CUR SEEK_END);
 use Getopt::Std;
+use LWP::UserAgent;
+use Data::Dumper;
+use MIME::Base64;
 
 our $opt_m; # mode
+our $opt_v; # verbosity
 
-getopts('m:');
+getopts('m:v');
 
 if (!defined($opt_m)) {
 	die "Need '-m <mode>' where <mode> is one of: t (test), x (extract), c (create)";
 }
+our $v;
+if (defined($opt_v)) {
+	$v = $opt_v;
+} else {
+	$v = 0;
+}
+
+my $ua = LWP::UserAgent->new();
+$ua->agent('Sia-Agent');
 
 # Configuration
 my $block_size = 8 * 1024;
@@ -39,6 +53,22 @@ my $hashes_dir = $archive_dir . "/hashes";
 # Create archive dir if it doesn't exist
 make_path($archive_dir) unless -d $archive_dir;
 make_path($hashes_dir) unless -d $hashes_dir;
+
+my $pass = $ENV{'renterpass'};
+our $auth = "Basic " . encode_base64(":$pass","");
+
+if ($opt_m eq "put") {
+	my $file = $ARGV[0];
+	my $file_content = read_file($file);
+
+	my $res = put('9880',
+		'api/worker/objects/name',
+		'sarchive',
+		$file_content,
+		$auth);
+	print Dumper($res);
+	exit(0);
+}
 
 if ($opt_m eq "c") {
 	foreach my $path (@ARGV) {
@@ -77,7 +107,6 @@ sub archive_file {
     my ($file_path) = @_;
     my $file_size = -s $file_path;
     my $file_name = basename($file_path);
-    my $file_hpath = sha1_hex($file_path);
     my @blocks = ();
     
     open(my $in_fh, '<', $file_path) or die "Cannot open $file_path: $!";
@@ -108,17 +137,27 @@ sub archive_file {
     return store_block(mkheader("dir", $data));
 }
 
+# XXX turn this into a bg queue via sqlite db?
 sub store_block {
 	my ($block_data) = @_;
         my $block_hash = sha1_hex($block_data);
-        my $block_archive_path = File::Spec->catfile($hashes_dir, $block_hash);
-        print "block $block_archive_path\n";
-        if (!-e $block_archive_path) {
-            open(my $block_out_fh, '>', $block_archive_path) or die "Cannot create $block_archive_path: $!";
-            binmode($block_out_fh);
-            print $block_out_fh $block_data;
-            close($block_out_fh);
-        }
+	if (head('9880',
+		'api/worker/objects/hashes/'.$block_hash,
+		'sarchive',
+		$auth)) {
+		if ($v>0) {
+			print " found $block_hash, not re-uploading\n";
+		}
+		return $block_hash;
+	}
+	my $res = put('9880',
+		'api/worker/objects/hashes/'.$block_hash,
+		'sarchive',
+		$block_data,
+		$auth);
+	if ($v>0) {
+		print " put $block_hash\n";
+	}
 	return $block_hash;
 }
 
@@ -140,6 +179,9 @@ sub make_pointer_blocks {
 	print "make_pointer_blocks: $#blist\n";
 
 	foreach my $block (@blist) {
+		if (!defined($block)) {
+			next;
+		}
 		if ( (length($block) + $size) > $block_size) {
 			push @blocks, store_block(mkheader("ptr",$data));
 			$data = "";
@@ -185,4 +227,41 @@ sub restore_file {
     close($out_fh);
 
     return $restored_file_path;
+}
+
+sub put {
+	my ($port, $cmd, $bucket, $data, $auth) = @_;
+
+	my $baseurl = "http://[::1]:${port}/";
+	my $url = $baseurl . $cmd . "?bucket=$bucket";
+	my $encoded_data;
+	my $req;
+
+	my $header = [ 'Content-Type' => 'text/plain',
+			'Authorization' => $auth ];
+
+	$req = HTTP::Request->new(PUT => $url,
+			$header,
+			$data);
+
+	my $res = $ua->request($req);
+	return $res;
+}
+
+sub head {
+	my ($port, $cmd, $bucket, $auth) = @_;
+
+	my $baseurl = "http://[::1]:${port}/";
+	my $url = $baseurl . $cmd . "?bucket=$bucket";
+	my $encoded_data;
+	my $req;
+
+	my $header = [ 'Content-Type' => 'text/plain',
+			'Authorization' => $auth ];
+
+	$req = HTTP::Request->new(HEAD => $url,
+			$header);
+
+	my $res = $ua->request($req);
+	return $res->is_success;
 }
