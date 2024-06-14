@@ -155,6 +155,9 @@ sub store_block {
 		'sarchive',
 		$block_data,
 		$auth);
+	if (!$res->is_success) {
+		die "Failed to upload $block_hash: ".$res->status_line;
+	}
 	if ($v>0) {
 		print " put $block_hash\n";
 	}
