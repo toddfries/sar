@@ -73,7 +73,7 @@ if ($opt_m eq "put") {
 if ($opt_m eq "c") {
 	foreach my $path (@ARGV) {
 		print "Processing $path\n";
-		if (-f $path) {
+		if (-f $path || $path eq "-") {
 			my $sha = archive_file($path);
 			print $sha . "\n";
 			next;
@@ -105,22 +105,28 @@ if ($opt_m eq "x") {
 
 sub archive_file {
     my ($file_path) = @_;
-    my $file_size = -s $file_path;
-    my $file_name = basename($file_path);
     my @blocks = ();
+    my $file_name;
+    my $in_fh;
+    if (defined($file_path) && $file_path ne "-") {
+	$file_name = basename($file_path);
+    	open($in_fh, '<', $file_path) or die "Cannot open $file_path: $!";
+    	binmode($in_fh);
+    } else {
+	$in_fh = \*STDIN;
+	$file_path = "-";
+    }
+	
     
-    open(my $in_fh, '<', $file_path) or die "Cannot open $file_path: $!";
-    binmode($in_fh);
-    
-    my $block_count = int($file_size / $block_size);
-    $block_count++ if $file_size % $block_size != 0;
-    
-    for my $block_index (0..$block_count-1) {
-        my $block_offset = $block_index * $block_size;
-        my $block_size_to_read = ($block_index == $block_count - 1) ? ($file_size % $block_size) : $block_size;
-        
-        seek($in_fh, $block_offset, SEEK_SET) or die "Cannot seek in $file_path: $!";
-        read($in_fh, my $block_data, $block_size_to_read) or die "Cannot read from $file_path: $!";
+    my $block_index = 0;
+    while(1) {
+        my $len = read($in_fh, my $block_data, $block_size);
+	if (!defined($len)) {
+		die "Cannot read from $file_path: $!";
+	}
+	if ($len == 0) {
+		last;
+	}
 
 	my $block_hash = store_block($block_data);        
 
