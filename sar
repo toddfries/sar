@@ -191,11 +191,16 @@ sub add_ptr {
 		next;
 	}
 	if (($ptrlen + $ablk->{size}) > $block_size) {
-		add_ptr( store_block( mkheader("ptr", $ablk->{data})));
+		my $sha = store_block( mkheader("ptr", $ablk->{data}));
 		init_ablk();
+		add_hash($sha);
 	}
-	$ablk->{data} .= $ptr . "\n";
-	$ablk->{size} += $ptrlen;
+	add_hash($ptr);
+}
+sub add_hash {
+	my ($hash) = @_;
+	$ablk->{data} .= $hash . "\n";
+	$ablk->{size} += length($hash);
 }
 sub close_ptr {
 	my ($ptr) = @_;
