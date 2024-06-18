@@ -56,6 +56,10 @@ make_path($hashes_dir) unless -d $hashes_dir;
 
 my $pass = $ENV{'renterpass'};
 our $auth = "Basic " . encode_base64(":$pass","");
+our $hdrsize = length(mkheader("ptr",""));
+
+our $ablk = { };
+init_ablk();
 
 if ($opt_m eq "put") {
 	my $file = $ARGV[0];
@@ -130,12 +134,11 @@ sub archive_file {
 
 	my $block_hash = store_block($block_data);        
 
-        push @blocks, $block_hash;
+        add_ptr($block_hash);
     }
     
     close($in_fh);
-
-    my $sha = make_pointer_blocks(@blocks);
+    my $sha = close_ptr();
 
     my $data = "file:$file_path\n";
     $data .= "ptr:$sha\n";
@@ -176,13 +179,35 @@ sub mkheader {
 	$str .= $data;
 	return $str;
 }
+sub init_ablk {
+	$ablk->{size} = $hdrsize;
+	$ablk->{data} = "";
+}
+	
+sub add_ptr {
+	my ($ptr) = @_;
+	my $ptrlen = length($ptr);
+	if (!defined($ptr)) {
+		next;
+	}
+	if (($ptrlen + $ablk->{size}) > $block_size) {
+		add_ptr( store_block( mkheader("ptr", $ablk->{data})));
+		init_ablk();
+	}
+	$ablk->{data} .= $ptr . "\n";
+	$ablk->{size} += $ptrlen;
+}
+sub close_ptr {
+	my ($ptr) = @_;
+	my $sha = store_block( mkheader("ptr", $ablk->{data}) );
+	init_ablk();
+	return $sha;
+}
 
 sub make_pointer_blocks {
 	my (@blist) = @_;
-	my $hdrsize = length(mkheader("ptr",""));
 	my $size = $hdrsize;
 	my $data = "";
-	my $line;
 	my @blocks = ();
 
 	print "make_pointer_blocks: $#blist\n";
@@ -198,7 +223,7 @@ sub make_pointer_blocks {
 		}
 		my $str = $block . "\n";
 		$data .= $str;
-		$size += length($str);
+		$size += length($str)+1;
 	}
 	if (length($data) > 0) {
 		push @blocks, store_block(mkheader("ptr", $data));
