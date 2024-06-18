@@ -26,6 +26,7 @@ use Getopt::Std;
 use LWP::UserAgent;
 use Data::Dumper;
 use MIME::Base64;
+use DBI;
 
 our $opt_m; # mode
 our $opt_v; # verbosity
@@ -58,8 +59,24 @@ my $pass = $ENV{'renterpass'};
 our $auth = "Basic " . encode_base64(":$pass","");
 our $hdrsize = length(mkheader("ptr",""));
 
+# memory data
 our $ablk = { };
 init_ablk();
+
+my $db_name = "hashqueue.db";
+my $tb_name = "bq";
+
+# db store
+our $dbh = DBI->connect("dbi:SQLite:$db_name") or
+	die "Couldn't connect to database: $DBI::errstr";
+
+my $sth = $dbh->prepare("CREATE TABLE IF NOT EXISTS $tb_name ".
+	"(id INTEGER PRIMARY KEY, hash TEXT, data BLOB)");
+$sth->execute();
+
+our $qbsth = $dbh->prepare("INSERT INTO $tb_name (hash, data) VALUES (?, ?)");
+our $ubsth = $dbh->prepare("SELECT id,hash,data FROM $tb_name LIMIT ?");
+our $rmsth = $dbh->prepare("DELETE FROM $tb_name WHERE id = ?");
 
 if ($opt_m eq "put") {
 	my $file = $ARGV[0];
@@ -86,6 +103,16 @@ if ($opt_m eq "c") {
 		#	process_dir($path);
 		#	next;
 		#}
+	}
+	exit(0);
+}
+if ($opt_m eq "rq") { # run queue
+	while(1) {
+		my $count = run_queue(10);
+		if ($count < 1) {
+			last;
+		}
+		print "Uploaded $count blocks\n";
 	}
 	exit(0);
 }
@@ -124,7 +151,7 @@ sub archive_file {
     
     my $block_index = 0;
     while(1) {
-        my $len = read($in_fh, my $block_data, $block_size);
+	my $len = read($in_fh, my $block_data, $block_size);
 	if (!defined($len)) {
 		die "Cannot read from $file_path: $!";
 	}
@@ -134,7 +161,7 @@ sub archive_file {
 
 	my $block_hash = store_block($block_data);        
 
-        add_ptr($block_hash);
+	add_ptr($block_hash);
     }
     
     close($in_fh);
@@ -149,7 +176,47 @@ sub archive_file {
 # XXX turn this into a bg queue via sqlite db?
 sub store_block {
 	my ($block_data) = @_;
-        my $block_hash = sha1_hex($block_data);
+	my $block_hash = sha1_hex($block_data);
+	queue_block($block_hash, $block_data);
+	return $block_hash;
+}
+sub queue_block {
+	my ($block_hash, $block_data) = @_;
+	# XXX best way to not duplicate storing the same block?
+	#  - separate select to see if there?
+	#  - handle error if insert with constraints?
+	#  ... for now, punt, and let head() catch before upload
+	eval {
+		$qbsth->execute($block_hash, $block_data);
+	};
+	if ($@) {
+		warn "Error queueing block: $@";
+	}
+}
+sub run_queue {
+	my ($maxcount) = @_;
+	if (!defined($maxcount)) {
+		$maxcount = 1;
+	}
+	my $count=0;
+	eval {
+		$ubsth->execute($maxcount);
+	};
+	if ($@) {
+		warn "Error retrieving block: $@";
+		return;
+	}
+	while (my $row = $ubsth->fetchrow_hashref) {
+		$count++;
+		my $ret = upload_block($row->{hash}, $row->{data});
+		if ($ret) {
+			$rmsth->execute($row->{id});
+		}
+	}
+	return $count;
+}
+sub upload_block {
+	my ($block_hash, $block_data) = @_;
 	if (head('9880',
 		'api/worker/objects/hashes/'.$block_hash,
 		'sarchive',
@@ -157,7 +224,7 @@ sub store_block {
 		if ($v>0) {
 			print " found $block_hash, not re-uploading\n";
 		}
-		return $block_hash;
+		return 1;
 	}
 	my $res = put('9880',
 		'api/worker/objects/hashes/'.$block_hash,
@@ -165,12 +232,13 @@ sub store_block {
 		$block_data,
 		$auth);
 	if (!$res->is_success) {
-		die "Failed to upload $block_hash: ".$res->status_line;
+		warn "Failed to upload $block_hash: ".$res->status_line;
+		return 0;
 	}
 	if ($v>0) {
 		print " put $block_hash\n";
 	}
-	return $block_hash;
+	return 1;
 }
 
 sub mkheader {
@@ -209,36 +277,6 @@ sub close_ptr {
 	return $sha;
 }
 
-sub make_pointer_blocks {
-	my (@blist) = @_;
-	my $size = $hdrsize;
-	my $data = "";
-	my @blocks = ();
-
-	print "make_pointer_blocks: $#blist\n";
-
-	foreach my $block (@blist) {
-		if (!defined($block)) {
-			next;
-		}
-		if ( (length($block) + $size) > $block_size) {
-			push @blocks, store_block(mkheader("ptr",$data));
-			$data = "";
-			$size = $hdrsize;
-		}
-		my $str = $block . "\n";
-		$data .= $str;
-		$size += length($str)+1;
-	}
-	if (length($data) > 0) {
-		push @blocks, store_block(mkheader("ptr", $data));
-	}
-	if ($#blocks > 0) {
-		return make_pointer_blocks(@blocks);
-	}
-	return $blocks[0];
-}
-
 sub restore_file {
     my ($archive_path) = @_;
     my $file_name = basename($archive_path);
@@ -251,11 +289,11 @@ sub restore_file {
     binmode($out_fh);
     
     while (my $line = <$in_fh>) {
-        chomp($line);
-        my $block_hash = $line;
-        my $block_archive_path = File::Spec->catfile($archive_dir, $block_hash);
-        
-        open(my $block_in_fh, '<', $block_archive_path) or die "Cannot open $block_archive_path: $!";
+	chomp($line);
+	my $block_hash = $line;
+	my $block_archive_path = File::Spec->catfile($archive_dir, $block_hash);
+	
+	open(my $block_in_fh, '<', $block_archive_path) or die "Cannot open $block_archive_path: $!";
 	binmode($block_in_fh);
 	    my $block_data;
     read($block_in_fh, $block_data, $block_size) or die "Cannot read from $block_archive_path: $!";
