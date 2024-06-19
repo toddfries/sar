@@ -32,8 +32,14 @@ use Data::Dumper;
 
 our $opt_m; # mode
 our $opt_v; # verbosity
+our $opt_d; # db name
+our $opt_t; # db type (Pg SQLite)
 
-getopts('m:v');
+# defaults
+$opt_d = "hashqueue";
+$opt_t = "pg";
+
+getopts('d:m:t:v');
 
 if (!defined($opt_m)) {
 	die "Need '-m <mode>' where <mode> is one of: t (test), x (extract), c (create)";
@@ -57,8 +63,6 @@ my $hashes_dir = $archive_dir . "/hashes";
 make_path($archive_dir) unless -d $archive_dir;
 make_path($hashes_dir) unless -d $hashes_dir;
 
-my $pass = $ENV{'renterpass'};
-our $auth = "Basic " . encode_base64(":$pass","");
 our $hdrsize = length(mkheader("ptr",""));
 
 # memory data
@@ -70,12 +74,12 @@ our $maxrunners = 20;
 our $rid; # runner id
 our $pid; # process id
 
-my $db_type = "pg";
+my $db_type = $opt_t;
 
 my $db_user = "";
 my $db_pass = "";
 our $dbp = { };
-$dbp->{db_name} = "hashqueue";
+$dbp->{db_name} = $opt_d;
 $dbp->{tb_name} = "bq";
 $dbp->{db_user} = "";
 $dbp->{db_pass} = "";
@@ -100,20 +104,6 @@ our $dbh;
 
 our ($qbsth,$ubsth,$rmsth);
 
-
-if ($opt_m eq "put") {
-	my $file = $ARGV[0];
-	my $file_content = read_file($file);
-
-	my $res = put('9880',
-		'api/worker/objects/name',
-		'sarchive',
-		$file_content,
-		$auth);
-	print Dumper($res);
-	exit(0);
-}
-
 if ($opt_m eq "c") {
 	db_init("dbi:".$dbp->{sqlname}.":".$dbp->{db_name}, $db_user, $db_pass);
 	foreach my $path (@ARGV) {
@@ -130,6 +120,35 @@ if ($opt_m eq "c") {
 	}
 	exit(0);
 }
+
+my $pass = $ENV{'renterpass'};
+if (!defined($pass)) {
+	die "renterpass env not set";
+}
+our $auth = "Basic " . encode_base64(":$pass","");
+
+if ($opt_m eq "put") {
+	my $file = $ARGV[0];
+	my $file_content = read_file($file);
+
+	my $res = put('9880',
+		'api/worker/objects/name',
+		'sarchive',
+		$file_content,
+		$auth);
+	print Dumper($res);
+	exit(0);
+}
+
+if ($opt_m eq "x") {
+	db_init("dbi:".$dbp->{sqlname}.":".$dbp->{db_name}, $db_user, $db_pass);
+	foreach my $sha (@ARGV) {
+		print "Extracting $sha\n";
+		restore_file($sha);
+	}
+	exit(0);
+}
+
 if ($opt_m eq "rq") { # run queue
 	#use Proc::Daemon;
 	#Proc::Daemon->init;
@@ -162,14 +181,6 @@ if ($opt_m eq "rq") { # run queue
 	exit(0);
 }
 
-if ($opt_m eq "x") {
-	db_init("dbi:".$dbp->{sqlname}.":".$dbp->{db_name}, $db_user, $db_pass);
-	foreach my $sha (@ARGV) {
-		print "Extracting $sha\n";
-		restore_file($sha);
-	}
-	exit(0);
-}
 
 print "unsupported mode: ${opt_m}\n";
 exit(1);
@@ -201,6 +212,7 @@ sub archive_file {
     my $block_index = 0;
     while(1) {
 	my $len = read($in_fh, my $block_data, $block_size);
+	printf "read %4d asked for %4d length of data = %4d\n", $len, $block_size, length($block_data);
 	if (!defined($len)) {
 		die "Cannot read from $file_path: $!";
 	}
