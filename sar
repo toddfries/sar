@@ -159,6 +159,7 @@ if ($opt_m eq "rq") { # run queue
 	for $rid (1..$maxrunners) {
 		my $fid = fork();
 		if ($fid == 0) {
+			$0 = "sar runner[$rid]";
 			print "rid $rid starting (pid $$)\n";
 			db_init("dbi:".$dbp->{sqlname}.":".$dbp->{db_name}, $db_user, $db_pass);
 			while(1) {
@@ -329,12 +330,14 @@ sub run_queue {
 			}
 			next;
 		}
+		$0 = "sar runner[$rid] ".sprintf("%4d %s", $row->{id}, $row->{hash});
 		printf "rid $rid row ".$row->{id}." handle %4d %s\n", length($row->{data}), $row->{hash};;
 		$count++;
 		my $ret = upload_block($row->{hash}, $row->{data});
 		if ($ret) {
 			dequeue($row->{id});
 		}
+		$0 = "sar runner[$rid]";
 	}
 	return $count+1;
 }
