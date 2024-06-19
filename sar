@@ -74,6 +74,7 @@ init_ablk();
 
 # for run queue
 our $maxrunners = $opt_r;
+our $max_cached_blocks = 128*1024;
 our $rid; # runner id
 our $pid; # process id
 
@@ -254,7 +255,7 @@ sub queue_block {
 	my $ret;
 	while (1) {
 		$ret = count_cache();
-		if ($ret < 10000) {
+		if ($ret < $max_cached_blocks) {
 			last;
 		}
 		sleep(10);
