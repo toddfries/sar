@@ -27,6 +27,7 @@ use LWP::UserAgent;
 use Data::Dumper;
 use MIME::Base64;
 use DBI;
+use DBD::Pg qw(:pg_types);
 use Time::HiRes qw(sleep);
 use Data::Dumper;
 
@@ -34,12 +35,14 @@ our $opt_m; # mode
 our $opt_v; # verbosity
 our $opt_d; # db name
 our $opt_t; # db type (Pg SQLite)
+our $opt_r; # runner count
 
 # defaults
 $opt_d = "hashqueue";
 $opt_t = "pg";
+$opt_r = 20;
 
-getopts('d:m:t:v');
+getopts('d:m:r:t:v');
 
 if (!defined($opt_m)) {
 	die "Need '-m <mode>' where <mode> is one of: t (test), x (extract), c (create)";
@@ -70,7 +73,7 @@ our $ablk = { };
 init_ablk();
 
 # for run queue
-our $maxrunners = 20;
+our $maxrunners = $opt_r;
 our $rid; # runner id
 our $pid; # process id
 
@@ -257,7 +260,19 @@ sub queue_block {
 	}
 	eval {
 		$dbh->do("BEGIN");
-		$ret = $qbsth->execute($block_hash, $block_data);
+		$qbsth->bind_param(1, $block_hash);
+		if ($db_type eq "pg") {
+			$qbsth->bind_param(2, $block_data, { pg_type => PG_BYTEA });
+		} else {
+			$qbsth->bind_param(2, $block_data);
+		}
+		$ret = $qbsth->execute();
+		printf "send %4d bytes w/hash %s\n", length($block_data), $block_hash;
+		my $vsth = $dbh->prepare("SELECT id,hash,data from bq where hash = ?");
+		$vsth->execute($block_hash);
+		my $row = $vsth->fetchrow_hashref;
+		printf "vrfy %4d bytes w/hash %s\n", length($row->{data}), $row->{hash};
+		$vsth->finish();
 	};
 	if ($@) {
 		warn "Error queueing block: $@";
@@ -367,16 +382,22 @@ sub dequeue {
 }
 sub upload_block {
 	my ($block_hash, $block_data) = @_;
-	if (head('9880',
+	my $res = head('9880',
 		'api/worker/objects/hashes/'.$block_hash,
 		'sarchive',
-		$auth)) {
+		$auth);
+	if ($res->is_success) {
 		if ($v>0) {
 			print " found $block_hash, not re-uploading\n";
 		}
-		return 1;
+		# XXX ? $res->header( 'last-modified' ) # 'Tue, 18 Jun 2024 06:59:03 GMT'
+		# XXX ? $res->header( 'etag' ) # '"ec7d3a3630bd9e4ef2a39769b781f761"'
+		# if size differs, don't say success
+		if ($res->header( 'content-length' ) == length($block_data)) {
+			return 1;
+		}
 	}
-	my $res = put('9880',
+	$res = put('9880',
 		'api/worker/objects/hashes/'.$block_hash,
 		'sarchive',
 		$block_data,
@@ -490,7 +511,9 @@ sub head {
 			$header);
 
 	my $res = $ua->request($req);
-	return $res->is_success;
+	#print Dumper($res);
+	#exit(0);
+	return $res;
 }
 
 sub db_init {
