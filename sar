@@ -66,7 +66,7 @@ our $ablk = { };
 init_ablk();
 
 # for run queue
-our $maxrunners = 10;
+our $maxrunners = 20;
 our $rid; # runner id
 our $pid; # process id
 
@@ -145,7 +145,9 @@ if ($opt_m eq "rq") { # run queue
 					last;
 				}
 				print "rid $rid Uploaded $count blocks\n";
-				sleep(2);
+				if (count_cache() < $maxrunners) {
+					sleep(2);
+				}
 			}
 			exit(0);
 		}
@@ -295,10 +297,12 @@ sub run_queue {
 		# avoid locking, just only upload when id % maxrunners == runner id
 		my $bucket = $id % $maxrunners;
 		if ( $bucket != ($rid-1)) {
+			if ($v>1) {
 			print "rid $rid row ".$row->{id}." bail $id % $maxrunners) = $bucket != ".($rid-1)."\n";
+			}
 			next;
 		}
-		print "rid $rid row ".$row->{id}." handle\n";
+		printf "rid $rid row ".$row->{id}." handle %4d %s\n", length($row->{data}), $row->{hash};;
 		$count++;
 		my $ret = upload_block($row->{hash}, $row->{data});
 		if ($ret) {
@@ -337,7 +341,9 @@ sub dequeue {
 			next;
 		}
 		$dbh->do("COMMIT");
+		if ($v>1) {
 		print "rid $rid $id ret = $ret\n";
+		}
 		$success++;
 		last;
 	}
