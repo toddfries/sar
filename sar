@@ -27,6 +27,8 @@ use LWP::UserAgent;
 use Data::Dumper;
 use MIME::Base64;
 use DBI;
+use Time::HiRes qw(sleep);
+use Data::Dumper;
 
 our $opt_m; # mode
 our $opt_v; # verbosity
@@ -63,20 +65,41 @@ our $hdrsize = length(mkheader("ptr",""));
 our $ablk = { };
 init_ablk();
 
-my $db_name = "hashqueue.db";
-my $tb_name = "bq";
+# for run queue
+our $maxrunners = 3;
+our $rid; # runner id
+our $pid; # process id
+
+my $db_type = "sqlite";
+
+my $db_user = "";
+my $db_pass = "";
+our $dbp = { };
+$dbp->{db_name} = "hashqueue";
+$dbp->{tb_name} = "bq";
+$dbp->{db_user} = "";
+$dbp->{db_pass} = "";
+$dbp->{timeout} = 100; # in secondts
+if ($db_type eq "sqlite") {
+	$dbp->{sqlname} = "SQLite";
+	$dbp->{serial} = "INTEGER PRIMARY KEY";
+	$dbp->{blobname} = "BLOB";
+	$dbp->{pragmas}->{busy_timeout} = 1000*$dbp->{timeout};
+	$dbp->{pragmas}->{journal_mode} = "WAL";
+	$dbp->{pragmas}->{synchronous} = "NORMAL";
+}
+if ($db_type eq "pg") {
+	$dbp->{sqlname} = "Pg";
+	$dbp->{serial} = "SERIAL";
+	$dbp->{blobname} = "BYTEA";
+}
+	
 
 # db store
-our $dbh = DBI->connect("dbi:SQLite:$db_name") or
-	die "Couldn't connect to database: $DBI::errstr";
+our $dbh;
 
-my $sth = $dbh->prepare("CREATE TABLE IF NOT EXISTS $tb_name ".
-	"(id INTEGER PRIMARY KEY, hash TEXT, data BLOB)");
-$sth->execute();
+our ($qbsth,$ubsth,$rmsth);
 
-our $qbsth = $dbh->prepare("INSERT INTO $tb_name (hash, data) VALUES (?, ?)");
-our $ubsth = $dbh->prepare("SELECT id,hash,data FROM $tb_name LIMIT ?");
-our $rmsth = $dbh->prepare("DELETE FROM $tb_name WHERE id = ?");
 
 if ($opt_m eq "put") {
 	my $file = $ARGV[0];
@@ -92,6 +115,7 @@ if ($opt_m eq "put") {
 }
 
 if ($opt_m eq "c") {
+	db_init("dbi:".$dbp->{sqlname}.":".$dbp->{db_name}, $db_user, $db_pass);
 	foreach my $path (@ARGV) {
 		print "Processing $path\n";
 		if (-f $path || $path eq "-") {
@@ -107,23 +131,46 @@ if ($opt_m eq "c") {
 	exit(0);
 }
 if ($opt_m eq "rq") { # run queue
-	while(1) {
-		my $count = run_queue(10);
-		if ($count < 1) {
-			last;
+	#use Proc::Daemon;
+	#Proc::Daemon->init;
+	my @pids;
+	for $rid (1..$maxrunners) {
+		my $fid = fork();
+		if ($fid == 0) {
+			print "rid $rid starting (pid $$)\n";
+			db_init("dbi:".$dbp->{sqlname}.":".$dbp->{db_name}, $db_user, $db_pass);
+			while(1) {
+				my $count = run_queue(10);
+				if ($count < 1) {
+					last;
+				}
+				print "rid $rid Uploaded $count blocks\n";
+				sleep(2);
+			}
+			exit(0);
 		}
-		print "Uploaded $count blocks\n";
+		push @pids,$fid;
+	}
+	foreach my $kid (@pids) {
+		my $ret = waitpid($kid,0);
+		if ($v>0) {
+			print "waitpid($kid,0) returned $ret\n";
+		}
 	}
 	exit(0);
 }
 
 if ($opt_m eq "x") {
+	db_init("dbi:".$dbp->{sqlname}.":".$dbp->{db_name}, $db_user, $db_pass);
 	foreach my $sha (@ARGV) {
 		print "Extracting $sha\n";
 		restore_file($sha);
 	}
 	exit(0);
 }
+
+print "unsupported mode: ${opt_m}\n";
+exit(1);
 
 # types of blocks
 # dir -> file metadata + pointer
@@ -186,34 +233,102 @@ sub queue_block {
 	#  - separate select to see if there?
 	#  - handle error if insert with constraints?
 	#  ... for now, punt, and let head() catch before upload
+	my $ret;
 	eval {
-		$qbsth->execute($block_hash, $block_data);
+		$dbh->do("BEGIN");
+		$ret = $qbsth->execute($block_hash, $block_data);
 	};
 	if ($@) {
 		warn "Error queueing block: $@";
+		return;
 	}
+	if (!defined($ret)) {
+		$dbh->do("ROLLBACK");
+		return;
+	}
+	$dbh->do("COMMIT");
 }
 sub run_queue {
 	my ($maxcount) = @_;
 	if (!defined($maxcount)) {
 		$maxcount = 1;
 	}
+	if ($v>0) {
+		warn "rid $rid run_queue($maxcount)";
+	}
 	my $count=0;
+	my $ret;
+	my $limit = $maxcount * $maxrunners;
 	eval {
-		$ubsth->execute($maxcount);
+		$dbh->do("BEGIN");
+		$ret = $ubsth->execute($limit);
 	};
 	if ($@) {
-		warn "Error retrieving block: $@";
-		return;
+		warn "rid $rid Error retrieving block: $@";
+		return 0;
+	}
+	if (!defined($ret)) {
+		$dbh->do("ROLLBACK");
+		warn "rid $rid ubsth failed! $! $@";
+		return 0;
+	}
+	$dbh->do("COMMIT");
+	if ($v>0) {
+		warn "rid $rid ubsth->execute($limit) returned $ret";
 	}
 	while (my $row = $ubsth->fetchrow_hashref) {
+		# avoid locking, just only upload when id % maxrunners == runner id
+		if ( ( ($row->{id}+1) % $maxrunners) != $rid) {
+			next;
+		}
+		print "rid $rid row ".$row->{id}."\n";
 		$count++;
 		my $ret = upload_block($row->{hash}, $row->{data});
 		if ($ret) {
-			$rmsth->execute($row->{id});
+			dequeue($row->{id});
 		}
 	}
-	return $count;
+	return $count+1;
+}
+sub dequeue {
+	my ($id) = @_;
+
+	my $timeout = $dbp->{timeout};
+	my $start_time = time();
+	my $retry_count = 0;
+
+	if ($v>0) {
+		print "rid $rid $id nuke attempt\n";
+	}
+
+	my $success = 0;
+	while(time() - $start_time < $timeout) {
+		my $ret;
+		eval {
+			$dbh->do("BEGIN");
+			$ret = $rmsth->execute(${id});
+		};
+		if ($@) {
+			my $tsleep = 1.0+rand(2);
+			warn "rid $rid $id Error removing ".${id}."from db: $@, will retry in ${tsleep}s";
+			sleep($tsleep);
+			$retry_count++;
+			next;
+		}
+		if (!defined($ret)) {
+			$dbh->do("ROLLBACK");
+			next;
+		}
+		$dbh->do("COMMIT");
+		print "rid $rid $id ret = $ret\n";
+		$success++;
+		last;
+	}
+	if ($success > 0) {
+		print "rid $rid $id Operation succeeded after $retry_count retries.\n";
+	} else {
+		print "rid $rid $id Operation failed.\n";
+	}
 }
 sub upload_block {
 	my ($block_hash, $block_data) = @_;
@@ -341,4 +456,30 @@ sub head {
 
 	my $res = $ua->request($req);
 	return $res->is_success;
+}
+
+sub db_init {
+	my ($cstr, $user, $pass) = @_;
+	$dbh = DBI->connect("dbi:".$dbp->{sqlname}.":".$dbp->{db_name},
+		$dbp->{db_user}, $dbp->{db_pass},{
+			RaiseError => 0,
+			PrintError => 0,
+		}) or die "Couldn't connect to database: $DBI::errstr";
+	#$dbh->trace(2);
+
+	my $sth = $dbh->prepare("CREATE TABLE IF NOT EXISTS ".$dbp->{tb_name}." ".
+		"(id ".$dbp->{serial}.", hash TEXT, data ".$dbp->{blobname}.")");
+	$sth->execute() or die "Couldn't create table: $DBI::errstr";
+	foreach my $pragma (keys %{ $dbp->{pragmas} }) {
+		my $pcmd = "PRAGMA ".$pragma." = ".$dbp->{pragmas}->{$pragma};
+		eval {
+			$dbh->do($pcmd);
+		};
+		if ($@) {
+			die "Couldn't do($pcmd): $@: $DBI::errstr";
+		}
+	}
+	$qbsth = $dbh->prepare("INSERT INTO ".$dbp->{tb_name}." (hash, data) VALUES (?, ?)");
+	$ubsth = $dbh->prepare("SELECT id,hash,data FROM ".$dbp->{tb_name}." LIMIT ?");
+	$rmsth = $dbh->prepare("DELETE FROM ".$dbp->{tb_name}." WHERE id = ?");
 }
