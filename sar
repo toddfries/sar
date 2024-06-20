@@ -161,14 +161,14 @@ if ($opt_m eq "rq") { # run queue
 		my $fid = fork();
 		if ($fid == 0) {
 			$0 = "sar runner[$rid]";
-			print "rid $rid starting (pid $$)\n";
+			printf "rid %2d starting (pid $$)\n", $rid;
 			db_init("dbi:".$dbp->{sqlname}.":".$dbp->{db_name}, $db_user, $db_pass);
 			while(1) {
 				my $count = run_queue(100);
 				if ($count < 1) {
 					last;
 				}
-				print "rid $rid Uploaded $count blocks\n";
+				printf "rid %2d Uploaded $count blocks\n", $rid;
 				if (count_cache() < $maxrunners) {
 					sleep(2);
 				}
@@ -299,7 +299,7 @@ sub run_queue {
 		$maxcount = 1;
 	}
 	if ($v>0) {
-		warn "rid $rid run_queue($maxcount)";
+		warn sprintf("rid %2d run_queue($maxcount)",$rid);
 	}
 	my $count=0;
 	my $ret;
@@ -309,17 +309,18 @@ sub run_queue {
 		$ret = $ubsth->execute($limit);
 	};
 	if ($@) {
-		warn "rid $rid Error retrieving block: $@";
+		warn sprintf("rid %2d Error retrieving block: $@",$rid);
 		return 0;
 	}
 	if (!defined($ret)) {
 		$dbh->do("ROLLBACK");
-		warn "rid $rid ubsth failed! $! $@";
+		warn sprintf("rid %2d ubsth failed! $! $@",$rid);
 		return 0;
 	}
 	$dbh->do("COMMIT");
 	if ($v>0) {
-		warn "rid $rid ubsth->execute($limit) returned $ret";
+		warn sprintf("rid %2d ubsth->execute($limit) returned $ret",
+			$rid);
 	}
 	while (my $row = $ubsth->fetchrow_hashref) {
 		my $id = $row->{id};
@@ -327,12 +328,12 @@ sub run_queue {
 		my $bucket = $id % $maxrunners;
 		if ( $bucket != ($rid-1)) {
 			if ($v>1) {
-			print "rid $rid row ".$row->{id}." bail $id % $maxrunners) = $bucket != ".($rid-1)."\n";
+			printf "rid %2d row %5d bail %2d % $maxrunners) = $bucket != ".($rid-1)."\n", $rid, $row->{id}, $id;
 			}
 			next;
 		}
-		$0 = "sar runner[$rid] ".sprintf("%4d %s", $row->{id}, $row->{hash});
-		printf "rid $rid row ".$row->{id}." handle %4d %s\n", length($row->{data}), $row->{hash};;
+		$0 = sprintf("sar runner[%2d] %4d %s", $rid, $row->{id}, $row->{hash});
+		printf "rid %2d row %5d handle %4d %s\n", $rid, $row->{id}, length($row->{data}), $row->{hash};;
 		$count++;
 		my $ret = upload_block($row->{hash}, $row->{data});
 		if ($ret) {
