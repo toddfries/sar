@@ -379,10 +379,11 @@ sub dequeue {
 		$success++;
 		last;
 	}
+	my $pre = sprintf("rid %2d %5d Operation", $rid, $id);
 	if ($success > 0) {
-		print "rid $rid $id Operation succeeded after $retry_count retries.\n";
+		printf "$pre succeeded after $retry_count retries.\n";
 	} else {
-		print "rid $rid $id Operation failed.\n";
+		printf "$pre Operation failed.\n";
 	}
 }
 sub upload_block {
