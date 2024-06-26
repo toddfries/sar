@@ -165,9 +165,6 @@ if ($opt_m eq "rq") { # run queue
 			db_init("dbi:".$dbp->{sqlname}.":".$dbp->{db_name}, $db_user, $db_pass);
 			while(1) {
 				my $count = run_queue(100);
-				if ($count < 1) {
-					last;
-				}
 				printf "rid %2d Uploaded $count blocks\n", $rid;
 				if (count_cache() < $maxrunners) {
 					sleep(2);
@@ -341,7 +338,7 @@ sub run_queue {
 		}
 		$0 = "sar runner[$rid]";
 	}
-	return $count+1;
+	return $count;
 }
 sub dequeue {
 	my ($id) = @_;
