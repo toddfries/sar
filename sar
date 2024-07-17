@@ -36,11 +36,13 @@ our $opt_v; # verbosity
 our $opt_d; # db name
 our $opt_t; # db type (Pg SQLite)
 our $opt_r; # runner count
+our $opt_p; # port for renterd
 
 # defaults
 $opt_d = "hashqueue";
 $opt_t = "pg";
 $opt_r = 20;
+$opt_p = 19881;
 
 getopts('d:m:r:t:v');
 
@@ -130,6 +132,11 @@ if (!defined($pass)) {
 	die "renterpass env not set";
 }
 our $auth = "Basic " . encode_base64(":$pass","");
+
+our $port = $opt_p;
+if (!defined($port)) {
+	die "need -p <renterd port number>";
+}
 
 if ($opt_m eq "put") {
 	my $file = $ARGV[0];
