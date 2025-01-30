@@ -16,6 +16,7 @@
 
 use strict;
 use warnings;
+
 use Digest::SHA1 qw(sha1_hex);
 use File::Path qw(make_path);
 use File::Spec;
@@ -30,21 +31,27 @@ use DBI;
 use DBD::Pg qw(:pg_types);
 use Time::HiRes qw(sleep);
 use Data::Dumper;
+use ReadConf;
+use JSON;
 
-our $opt_m; # mode
-our $opt_v; # verbosity
+our $opt_b; # renterd bucket
+our $opt_c; # config file
 our $opt_d; # db name
-our $opt_t; # db type (Pg SQLite)
-our $opt_r; # runner count
+our $opt_m; # mode
 our $opt_p; # port for renterd
+our $opt_r; # runner count
+our $opt_s; # conf section
+our $opt_t; # db type (Pg SQLite)
+our $opt_v; # verbosity
 
 # defaults
+$opt_c = $ENV{HOME}."/.config/sar/conf";
 $opt_d = "hashqueue";
 $opt_t = "pg";
 $opt_r = 20;
-$opt_p = 19881;
+$opt_s = "default";
 
-getopts('d:m:r:t:v');
+getopts('c:d:m:r:s:t:v');
 
 if (!defined($opt_m)) {
 	die "Need '-m <mode>' where <mode> is one of: t (test), x (extract), c (create)";
@@ -56,8 +63,23 @@ if (defined($opt_v)) {
 	$v = 0;
 }
 
+my $rc = ReadConf->new();
+our $conf = $rc->readconf($opt_c);
+
 my $ua = LWP::UserAgent->new();
 $ua->agent('Sia-Agent');
+
+our $gv = { }; # global vars
+$gv->{renterport} = $conf->{$opt_s}->{port};
+$gv->{renterpass} = $conf->{$opt_s}->{pass};
+$gv->{renterbucket} = $conf->{$opt_s}->{bucket};
+
+if (defined $opt_p) {
+	$gv->{renterport} = $opt_p;
+}
+if (defined $opt_b) {
+	$gv->{renterbucket} = $opt_b;
+}
 
 # Configuration
 my $block_size = 8 * 1024;
@@ -103,7 +125,6 @@ if ($db_type eq "pg") {
 	$dbp->{serial} = "SERIAL";
 	$dbp->{blobname} = "BYTEA";
 }
-	
 
 # db store
 our $dbh;
@@ -127,24 +148,16 @@ if ($opt_m eq "c") {
 	exit(0);
 }
 
-my $pass = $ENV{'renterpass'};
-if (!defined($pass)) {
-	die "renterpass env not set";
-}
-our $auth = "Basic " . encode_base64(":$pass","");
+our $auth = "Basic " . encode_base64(":".$gv->{renterpass},"");
 
-our $port = $opt_p;
-if (!defined($port)) {
-	die "need -p <renterd port number>";
-}
 
 if ($opt_m eq "put") {
 	my $file = $ARGV[0];
 	my $file_content = read_file($file);
 
-	my $res = put('9880',
+	my $res = put($gv->{renterport},
 		'api/worker/objects/name',
-		'sarchive',
+		$gv->{renterbucket},
 		$file_content,
 		$auth);
 	print Dumper($res);
@@ -159,6 +172,30 @@ if ($opt_m eq "x") {
 	}
 	exit(0);
 }
+
+if ($opt_m eq "t") {
+	my $path = $ARGV[0];
+	my $res = get($gv->{renterport},
+		'api/bus/objects/'.$path,
+		$gv->{renterbucket},
+		{ },
+		$auth);
+	print "test res: ".Dumper($res);
+	exit(0);
+}
+if ($opt_m eq "d") {
+	my $path = $ARGV[0];
+	my $res = delo($path);
+	print "del res: ".Dumper($res);
+	exit(0);
+}
+if ($opt_m eq "l") {
+	my $path = $ARGV[0];
+	my $res = listo($path, "");
+
+	exit(0);
+}
+
 
 if ($opt_m eq "rq") { # run queue
 	#use Proc::Daemon;
@@ -216,8 +253,7 @@ sub archive_file {
 	$in_fh = \*STDIN;
 	$file_path = "-";
     }
-	
-    
+
     my $block_index = 0;
     while(1) {
 	my $len = read($in_fh, my $block_data, $block_size);
@@ -392,9 +428,9 @@ sub dequeue {
 }
 sub upload_block {
 	my ($block_hash, $block_data) = @_;
-	my $res = head('9880',
+	my $res = head($gv->{renterport},
 		'api/worker/objects/hashes/'.$block_hash,
-		'sarchive',
+		$gv->{renterbucket},
 		$auth);
 	if ($res->is_success) {
 		if ($v>0) {
@@ -407,9 +443,9 @@ sub upload_block {
 			return 1;
 		}
 	}
-	$res = put('9880',
+	$res = put($gv->{renterport},
 		'api/worker/objects/hashes/'.$block_hash,
-		'sarchive',
+		$gv->{renterbucket},
 		$block_data,
 		$auth);
 	if (!$res->is_success) {
@@ -432,7 +468,7 @@ sub init_ablk {
 	$ablk->{size} = $hdrsize;
 	$ablk->{data} = "";
 }
-	
+
 sub add_ptr {
 	my ($ptr) = @_;
 	my $ptrlen = length($ptr);
@@ -473,7 +509,7 @@ sub restore_file {
 	chomp($line);
 	my $block_hash = $line;
 	my $block_archive_path = File::Spec->catfile($archive_dir, $block_hash);
-	
+
 	open(my $block_in_fh, '<', $block_archive_path) or die "Cannot open $block_archive_path: $!";
 	binmode($block_in_fh);
 	    my $block_data;
@@ -505,6 +541,25 @@ sub put {
 	my $res = $ua->request($req);
 	return $res;
 }
+sub post {
+	my ($port, $cmd, $bucket, $data, $auth) = @_;
+
+	my $baseurl = "http://[::1]:${port}/";
+	my $url = $baseurl . $cmd . "?bucket=$bucket";
+	my $encoded_data;
+	my $json = JSON->new->utf8->encode($data);
+	my $req;
+
+	my $header = [ 'Content-Type' => 'application/json',
+			'Authorization' => $auth ];
+
+	$req = HTTP::Request->new(POST => $url,
+			$header,
+			$json);
+
+	my $res = $ua->request($req);
+	return $res;
+}
 
 sub head {
 	my ($port, $cmd, $bucket, $auth) = @_;
@@ -518,6 +573,56 @@ sub head {
 			'Authorization' => $auth ];
 
 	$req = HTTP::Request->new(HEAD => $url,
+			$header);
+
+	my $res = $ua->request($req);
+	#print Dumper($res);
+	#exit(0);
+	return $res;
+}
+
+sub get {
+	my ($port, $cmd, $bucket, $params, $auth) = @_;
+
+	my $baseurl = "http://[::1]:${port}/";
+	my $url = $baseurl . $cmd;
+	$params->{bucket} = $bucket;
+	my $str = "";
+	for my $var (keys %{ $params }) {
+		if (length($str) < 1) {
+			$str=$str."?${var}=".$params->{$var};
+			next;
+		}
+		$str=$str."&${var}=".$params->{$var};
+	}
+	$url .= $str;
+
+	my $encoded_data;
+	my $req;
+
+	my $header = [ 'Content-Type' => 'text/plain',
+			'Authorization' => $auth ];
+
+	$req = HTTP::Request->new(GET => $url,
+			$header);
+
+	my $res = $ua->request($req);
+	#print Dumper($res);
+	#exit(0);
+	return $res;
+}
+sub del {
+	my ($port, $cmd, $bucket, $auth) = @_;
+
+	my $baseurl = "http://[::1]:${port}/";
+	my $url = $baseurl . $cmd . "?bucket=$bucket";
+	my $encoded_data;
+	my $req;
+
+	my $header = [ 'Content-Type' => 'text/plain',
+			'Authorization' => $auth ];
+
+	$req = HTTP::Request->new(DELETE => $url,
 			$header);
 
 	my $res = $ua->request($req);
@@ -550,4 +655,67 @@ sub db_init {
 	$qbsth = $dbh->prepare("INSERT INTO ".$dbp->{tb_name}." (hash, data) VALUES (?, ?)");
 	$ubsth = $dbh->prepare("SELECT id,hash,data FROM ".$dbp->{tb_name}." ORDER BY id ASC LIMIT ?");
 	$rmsth = $dbh->prepare("DELETE FROM ".$dbp->{tb_name}." WHERE id = ?");
+}
+
+sub fmt_objects {
+	my ($objects) = @_;
+	my $hidehealth = 0.7;
+	for my $o (@{ $objects->{objects} }) {
+		if ($o->{health} > $hidehealth) {
+			next;
+		}
+		printf "%5f %12d %s%s\n",
+			$o->{health},
+			$o->{size},
+			$o->{bucket},
+			$o->{key};
+	}
+}
+sub listo {
+	my ($path, $next) = @_;
+	$path =~ s/^\///;
+	if (! ($path =~ /\/$/)) {
+		$path .= "/";
+	}
+	my $params = {
+		"limit" => 100,
+		"prefix" => $path,
+		"marker" => "",
+		"recursive" => JSON::false,
+		"delimiter" => "",
+		"sortby" => "",
+		"sortdir" => "",
+		"substring" => "",
+		"marker" => $next,
+	};
+	my $call = 'api/bus/objects/';
+	my $res = get($gv->{renterport},
+		$call,
+		$gv->{renterbucket},
+		$params,
+		$auth);
+	#print "post res: ".Dumper($res);
+	my $objects = JSON->new->utf8->decode($res->{_content});
+	fmt_objects($objects);
+	my $minhealth = -0.1;
+	for my $o (@{ $objects->{objects} }) {
+		if ($o->{health} < $minhealth) {
+			delo($o->{key});
+		}
+	}
+	#printf "next: listo(%s, %s);\n", $path, $objects->{nextMarker};
+	return listo($path, $objects->{nextMarker});
+}
+sub delo {
+	my ($path) = @_;
+
+	$path =~ s/^\///;
+
+	printf "D %s", $path;
+	my $res = del($gv->{renterport},
+		'api/bus/object/'.$path,
+		$gv->{renterbucket},
+		$auth);
+	print "\n";
+	return $res;
 }
