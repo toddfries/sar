@@ -51,7 +51,7 @@ $opt_t = "pg";
 $opt_r = 20;
 $opt_s = "default";
 
-getopts('c:d:m:r:s:t:v');
+getopts('b:c:d:m:r:s:t:v');
 
 if (!defined($opt_m)) {
 	die "Need '-m <mode>' where <mode> is one of: t (test), x (extract), c (create)";
@@ -674,6 +674,11 @@ sub fmt_objects {
 sub listo {
 	my ($p, $n) = @_;
 
+	$p //= "";
+	$p =~ s/^\///;
+	if (! ($p =~ /\/$/)) {
+		$p .= "/";
+	}
 	my @next = ("");
 	my $ncount = 0;
 	my $res;
@@ -681,44 +686,47 @@ sub listo {
 	#printf "ncount %d vs nextcount %d\n", $ncount, $#next;
 	while ($ncount <= $#next) {
 		my $n = $next[$ncount++];
-	$p =~ s/^\///;
-	if (! ($p =~ /\/$/)) {
-		$p .= "/";
-	}
-	my $params = {
-		"limit" => 100,
-		"prefix" => $p,
-		"marker" => "",
-		"recursive" => JSON::false,
-		"delimiter" => "",
-		"sortby" => "",
-		"sortdir" => "",
-		"substring" => "",
-		"marker" => $n,
-	};
-	my $call = 'api/bus/objects/';
-	$res = get($gv->{renterport},
-		$call,
-		$gv->{renterbucket},
-		$params,
-		$auth);
-	#print "post res: ".Dumper($res);
-	my $objects = JSON->new->utf8->decode($res->{_content});
-	fmt_objects($objects);
-	my $minhealth = -0.1;
-	for my $o (@{ $objects->{objects} }) {
-		if ($o->{health} < $minhealth) {
-			delo($o->{key});
+		my $recursedir = 1;
+		my $recjson;
+		if ($recursedir > 0) {
+			$recjson = JSON::true;
+		} else {
+			$recjson = JSON::false;
 		}
+		my $params = {
+			"limit" => 2048,
+			"prefix" => $p,
+			"marker" => "",
+			"recursive" => $recjson,
+			"delimiter" => "",
+			"sortby" => "",
+			"sortdir" => "",
+			"substring" => "",
+			"marker" => $n,
+		};
+		my $call = 'api/bus/objects/';
+		$res = get($gv->{renterport},
+			$call,
+			$gv->{renterbucket},
+			$params,
+			$auth);
+		#print "post res: ".Dumper($res);
+		my $objects = JSON->new->utf8->decode($res->{_content});
+		fmt_objects($objects);
+		my $minhealth = -0.5;
+		for my $o (@{ $objects->{objects} }) {
+			if ($o->{health} < $minhealth) {
+				delo($o->{key});
+			}
+		}
+		#printf "next: listo(%s, %s);\n", $p, $objects->{nextMarker};
+		#print "hasMore is ".Dumper($objects->{hasMore});
+		if ($objects->{hasMore} == JSON::true) {
+			push @next, $objects->{nextMarker};
+			goto _recurse;
+		}
+		return $res;
 	}
-	#printf "next: listo(%s, %s);\n", $p, $objects->{nextMarker};
-	#print "hasMore is ".Dumper($objects->{hasMore});
-	if ($objects->{hasMore} == JSON::true) {
-		push @next, $objects->{nextMarker};
-		goto _recurse;
-	}
-	}
-	return $res;
 }
 sub delo {
 	my ($path) = @_;
@@ -730,6 +738,6 @@ sub delo {
 		'api/bus/object/'.$path,
 		$gv->{renterbucket},
 		$auth);
-	print "\n";
+	print " ".$res->{_msg}."\n";
 	return $res;
 }
