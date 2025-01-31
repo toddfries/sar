@@ -186,7 +186,7 @@ if ($opt_m eq "t") {
 if ($opt_m eq "d") {
 	my $path = $ARGV[0];
 	my $res = delo($path);
-	print "del res: ".Dumper($res);
+	#print "del res: ".Dumper($res);
 	exit(0);
 }
 if ($opt_m eq "l") {
@@ -711,6 +711,10 @@ sub listo {
 			$params,
 			$auth);
 		#print "post res: ".Dumper($res);
+		my $content = $res->{_content};
+		if ($content =~ /^<.xml version=/) {
+			die "Ooops... $content";
+		}
 		my $objects = JSON->new->utf8->decode($res->{_content});
 		fmt_objects($objects);
 		my $minhealth = -0.5;
