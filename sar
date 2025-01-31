@@ -672,24 +672,32 @@ sub fmt_objects {
 	}
 }
 sub listo {
-	my ($path, $next) = @_;
-	$path =~ s/^\///;
-	if (! ($path =~ /\/$/)) {
-		$path .= "/";
+	my ($p, $n) = @_;
+
+	my @next = ("");
+	my $ncount = 0;
+	my $res;
+	_recurse:
+	#printf "ncount %d vs nextcount %d\n", $ncount, $#next;
+	while ($ncount <= $#next) {
+		my $n = $next[$ncount++];
+	$p =~ s/^\///;
+	if (! ($p =~ /\/$/)) {
+		$p .= "/";
 	}
 	my $params = {
 		"limit" => 100,
-		"prefix" => $path,
+		"prefix" => $p,
 		"marker" => "",
 		"recursive" => JSON::false,
 		"delimiter" => "",
 		"sortby" => "",
 		"sortdir" => "",
 		"substring" => "",
-		"marker" => $next,
+		"marker" => $n,
 	};
 	my $call = 'api/bus/objects/';
-	my $res = get($gv->{renterport},
+	$res = get($gv->{renterport},
 		$call,
 		$gv->{renterbucket},
 		$params,
@@ -703,8 +711,14 @@ sub listo {
 			delo($o->{key});
 		}
 	}
-	#printf "next: listo(%s, %s);\n", $path, $objects->{nextMarker};
-	return listo($path, $objects->{nextMarker});
+	#printf "next: listo(%s, %s);\n", $p, $objects->{nextMarker};
+	#print "hasMore is ".Dumper($objects->{hasMore});
+	if ($objects->{hasMore} == JSON::true) {
+		push @next, $objects->{nextMarker};
+		goto _recurse;
+	}
+	}
+	return $res;
 }
 sub delo {
 	my ($path) = @_;
