@@ -573,9 +573,11 @@ sub _call {
 	my $header = [ 'Content-Type' => $atype,
 			'Authorization' => $auth ];
 
-	$req = HTTP::Request->new($type => $url,
-			$header,
-			$data);
+	if ($type =~ /(POST|PUT)/) {
+		$req = HTTP::Request->new($type => $url, $header, $data);
+	} else {
+		$req = HTTP::Request->new($type => $url, $header);
+	}
 
 	my $res = $ua->request($req);
 	#print Dumper($res);
