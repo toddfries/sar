@@ -155,9 +155,7 @@ if ($opt_m eq "put") {
 	my $file = $ARGV[0];
 	my $file_content = read_file($file);
 
-	my $res = put($gv->{renterport},
-		'api/worker/objects/name',
-		$gv->{renterbucket},
+	my $res = put('api/worker/objects/name',
 		$file_content,
 		$auth);
 	print Dumper($res);
@@ -175,9 +173,7 @@ if ($opt_m eq "x") {
 
 if ($opt_m eq "t") {
 	my $path = $ARGV[0];
-	my $res = get($gv->{renterport},
-		'api/bus/objects/'.$path,
-		$gv->{renterbucket},
+	my $res = get('api/bus/objects/'.$path,
 		{ },
 		$auth);
 	print "test res: ".Dumper($res);
@@ -193,6 +189,15 @@ if ($opt_m eq "l") {
 	my $path = $ARGV[0];
 	my $res = listo($path, "");
 
+	exit(0);
+}
+if ($opt_m eq "alerts") {
+	my $call = 'api/bus/alerts';
+	#$call .= "?offset=0&limit=10";
+	my $res = get($call,
+		{ },
+		$auth);
+	print "alerts: ".Dumper($res);
 	exit(0);
 }
 
@@ -428,9 +433,7 @@ sub dequeue {
 }
 sub upload_block {
 	my ($block_hash, $block_data) = @_;
-	my $res = head($gv->{renterport},
-		'api/worker/objects/hashes/'.$block_hash,
-		$gv->{renterbucket},
+	my $res = head('api/worker/objects/hashes/'.$block_hash,
 		$auth);
 	if ($res->is_success) {
 		if ($v>0) {
@@ -443,9 +446,7 @@ sub upload_block {
 			return 1;
 		}
 	}
-	$res = put($gv->{renterport},
-		'api/worker/objects/hashes/'.$block_hash,
-		$gv->{renterbucket},
+	$res = put('api/worker/objects/hashes/'.$block_hash,
 		$block_data,
 		$auth);
 	if (!$res->is_success) {
@@ -524,7 +525,9 @@ sub restore_file {
 }
 
 sub put {
-	my ($port, $cmd, $bucket, $data, $auth) = @_;
+	my ($cmd, $data, $auth) = @_;
+	my $port = $gv->{renterport};
+	my $bucket = $gv->{renterbucket};
 
 	my $baseurl = "http://[::1]:${port}/";
 	my $url = $baseurl . $cmd . "?bucket=$bucket";
@@ -542,7 +545,9 @@ sub put {
 	return $res;
 }
 sub post {
-	my ($port, $cmd, $bucket, $data, $auth) = @_;
+	my ($cmd, $data, $auth) = @_;
+	my $port = $gv->{renterport};
+	my $bucket = $gv->{renterbucket};
 
 	my $baseurl = "http://[::1]:${port}/";
 	my $url = $baseurl . $cmd . "?bucket=$bucket";
@@ -562,7 +567,9 @@ sub post {
 }
 
 sub head {
-	my ($port, $cmd, $bucket, $auth) = @_;
+	my ($cmd, $auth) = @_;
+	my $port = $gv->{renterport};
+	my $bucket = $gv->{renterbucket};
 
 	my $baseurl = "http://[::1]:${port}/";
 	my $url = $baseurl . $cmd . "?bucket=$bucket";
@@ -582,7 +589,9 @@ sub head {
 }
 
 sub get {
-	my ($port, $cmd, $bucket, $params, $auth) = @_;
+	my ($cmd, $params, $auth) = @_;
+	my $port = $gv->{renterport};
+	my $bucket = $gv->{renterbucket};
 
 	my $baseurl = "http://[::1]:${port}/";
 	my $url = $baseurl . $cmd;
@@ -612,7 +621,9 @@ sub get {
 	return $res;
 }
 sub del {
-	my ($port, $cmd, $bucket, $auth) = @_;
+	my ($cmd, $auth) = @_;
+	my $port = $gv->{renterport};
+	my $bucket = $gv->{renterbucket};
 
 	my $baseurl = "http://[::1]:${port}/";
 	my $url = $baseurl . $cmd . "?bucket=$bucket";
@@ -705,9 +716,7 @@ sub listo {
 			"marker" => $n,
 		};
 		my $call = 'api/bus/objects/';
-		$res = get($gv->{renterport},
-			$call,
-			$gv->{renterbucket},
+		$res = get($call,
 			$params,
 			$auth);
 		#print "post res: ".Dumper($res);
@@ -738,9 +747,7 @@ sub delo {
 	$path =~ s/^\///;
 
 	printf "D %s", $path;
-	my $res = del($gv->{renterport},
-		'api/bus/object/'.$path,
-		$gv->{renterbucket},
+	my $res = del('api/bus/object/'.$path,
 		$auth);
 	print " ".$res->{_msg}."\n";
 	return $res;
