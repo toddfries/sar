@@ -73,6 +73,8 @@ our $gv = { }; # global vars
 $gv->{renterport} = $conf->{$opt_s}->{port};
 $gv->{renterpass} = $conf->{$opt_s}->{pass};
 $gv->{renterbucket} = $conf->{$opt_s}->{bucket};
+$gv->{JSON} = JSON->new->utf8();
+$gv->{AUTH} = "Basic " . encode_base64(":".$gv->{renterpass},"");
 
 if (defined $opt_p) {
 	$gv->{renterport} = $opt_p;
@@ -148,7 +150,6 @@ if ($opt_m eq "c") {
 	exit(0);
 }
 
-our $auth = "Basic " . encode_base64(":".$gv->{renterpass},"");
 
 
 if ($opt_m eq "put") {
@@ -156,8 +157,7 @@ if ($opt_m eq "put") {
 	my $file_content = read_file($file);
 
 	my $res = put('api/worker/objects/name',
-		$file_content,
-		$auth);
+		$file_content);
 	print Dumper($res);
 	exit(0);
 }
@@ -174,8 +174,7 @@ if ($opt_m eq "x") {
 if ($opt_m eq "t") {
 	my $path = $ARGV[0];
 	my $res = get('api/bus/objects/'.$path,
-		{ },
-		$auth);
+		{ });
 	print "test res: ".Dumper($res);
 	exit(0);
 }
@@ -194,9 +193,7 @@ if ($opt_m eq "l") {
 if ($opt_m eq "alerts") {
 	my $call = 'api/bus/alerts';
 	#$call .= "?offset=0&limit=10";
-	my $res = get($call,
-		{ },
-		$auth);
+	my $res = get($call, { });
 	print "alerts: ".Dumper($res);
 	exit(0);
 }
@@ -433,8 +430,7 @@ sub dequeue {
 }
 sub upload_block {
 	my ($block_hash, $block_data) = @_;
-	my $res = head('api/worker/objects/hashes/'.$block_hash,
-		$auth);
+	my $res = head('api/worker/objects/hashes/'.$block_hash);
 	if ($res->is_success) {
 		if ($v>0) {
 			print " found $block_hash, not re-uploading\n";
@@ -447,8 +443,7 @@ sub upload_block {
 		}
 	}
 	$res = put('api/worker/objects/hashes/'.$block_hash,
-		$block_data,
-		$auth);
+		$block_data);
 	if (!$res->is_success) {
 		warn "Failed to upload $block_hash: ".$res->status_line;
 		return 0;
@@ -525,116 +520,62 @@ sub restore_file {
 }
 
 sub put {
-	my ($cmd, $data, $auth) = @_;
-	my $port = $gv->{renterport};
-	my $bucket = $gv->{renterbucket};
-
-	my $baseurl = "http://[::1]:${port}/";
-	my $url = $baseurl . $cmd . "?bucket=$bucket";
-	my $encoded_data;
-	my $req;
-
-	my $header = [ 'Content-Type' => 'text/plain',
-			'Authorization' => $auth ];
-
-	$req = HTTP::Request->new(PUT => $url,
-			$header,
-			$data);
-
-	my $res = $ua->request($req);
-	return $res;
+	my ($cmd, $data) = @_;
+	return _call("PUT", $cmd, $data);
 }
 sub post {
-	my ($cmd, $data, $auth) = @_;
-	my $port = $gv->{renterport};
-	my $bucket = $gv->{renterbucket};
-
-	my $baseurl = "http://[::1]:${port}/";
-	my $url = $baseurl . $cmd . "?bucket=$bucket";
-	my $encoded_data;
-	my $json = JSON->new->utf8->encode($data);
-	my $req;
-
-	my $header = [ 'Content-Type' => 'application/json',
-			'Authorization' => $auth ];
-
-	$req = HTTP::Request->new(POST => $url,
-			$header,
-			$json);
-
-	my $res = $ua->request($req);
-	return $res;
+	my ($cmd, $data) = @_;
+	return _call("POST", $cmd, $data);
 }
 
 sub head {
-	my ($cmd, $auth) = @_;
-	my $port = $gv->{renterport};
-	my $bucket = $gv->{renterbucket};
-
-	my $baseurl = "http://[::1]:${port}/";
-	my $url = $baseurl . $cmd . "?bucket=$bucket";
-	my $encoded_data;
-	my $req;
-
-	my $header = [ 'Content-Type' => 'text/plain',
-			'Authorization' => $auth ];
-
-	$req = HTTP::Request->new(HEAD => $url,
-			$header);
-
-	my $res = $ua->request($req);
-	#print Dumper($res);
-	#exit(0);
-	return $res;
+	my ($cmd) = @_;
+	return _call("HEAD", $cmd);
 }
 
 sub get {
-	my ($cmd, $params, $auth) = @_;
+	my ($cmd, $parms) = @_;
+	return _call("GET", $cmd, $parms);
+}
+sub del {
+	my ($cmd) = @_;
+	return _call("DELETE", $cmd);
+}
+sub _call {
+	my ($type, $cmd, $data) = @_;
 	my $port = $gv->{renterport};
+	my $auth = $gv->{AUTH};
 	my $bucket = $gv->{renterbucket};
+	my $atype = 'text/plain';
 
 	my $baseurl = "http://[::1]:${port}/";
 	my $url = $baseurl . $cmd;
-	$params->{bucket} = $bucket;
+	my $parms = { };
+	if (ref($data) eq "HASH" && ! ($type =~ /(POST|PUT)/)) {
+		$parms = $data;
+	} elsif ($type eq "POST") {
+		my $json = $gv->{JSON}->encode($data);
+		$data = $json;
+		$atype = 'application/json';
+	}
+	$parms->{bucket} = $gv->{renterbucket};
 	my $str = "";
-	for my $var (keys %{ $params }) {
+	for my $var (keys %{ $parms }) {
 		if (length($str) < 1) {
-			$str=$str."?${var}=".$params->{$var};
+			$str=$str."?${var}=".$parms->{$var};
 			next;
 		}
-		$str=$str."&${var}=".$params->{$var};
+		$str=$str."&${var}=".$parms->{$var};
 	}
 	$url .= $str;
-
-	my $encoded_data;
 	my $req;
 
-	my $header = [ 'Content-Type' => 'text/plain',
+	my $header = [ 'Content-Type' => $atype,
 			'Authorization' => $auth ];
 
-	$req = HTTP::Request->new(GET => $url,
-			$header);
-
-	my $res = $ua->request($req);
-	#print Dumper($res);
-	#exit(0);
-	return $res;
-}
-sub del {
-	my ($cmd, $auth) = @_;
-	my $port = $gv->{renterport};
-	my $bucket = $gv->{renterbucket};
-
-	my $baseurl = "http://[::1]:${port}/";
-	my $url = $baseurl . $cmd . "?bucket=$bucket";
-	my $encoded_data;
-	my $req;
-
-	my $header = [ 'Content-Type' => 'text/plain',
-			'Authorization' => $auth ];
-
-	$req = HTTP::Request->new(DELETE => $url,
-			$header);
+	$req = HTTP::Request->new($type => $url,
+			$header,
+			$data);
 
 	my $res = $ua->request($req);
 	#print Dumper($res);
@@ -704,7 +645,7 @@ sub listo {
 		} else {
 			$recjson = JSON::false;
 		}
-		my $params = {
+		my $parms = {
 			"limit" => 2048,
 			"prefix" => $p,
 			"marker" => "",
@@ -716,9 +657,7 @@ sub listo {
 			"marker" => $n,
 		};
 		my $call = 'api/bus/objects/';
-		$res = get($call,
-			$params,
-			$auth);
+		$res = get($call, $parms);
 		#print "post res: ".Dumper($res);
 		my $content = $res->{_content};
 		if ($content =~ /^<.xml version=/) {
@@ -747,8 +686,7 @@ sub delo {
 	$path =~ s/^\///;
 
 	printf "D %s", $path;
-	my $res = del('api/bus/object/'.$path,
-		$auth);
+	my $res = del('api/bus/object/'.$path);
 	print " ".$res->{_msg}."\n";
 	return $res;
 }
