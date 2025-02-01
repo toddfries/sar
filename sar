@@ -156,9 +156,9 @@ if ($opt_m eq "put") {
 	my $file = $ARGV[0];
 	my $file_content = read_file($file);
 
-	my $res = put('api/worker/objects/name',
+	my $content = put('api/worker/objects/name',
 		$file_content);
-	print Dumper($res);
+	print Dumper($content);
 	exit(0);
 }
 
@@ -173,28 +173,79 @@ if ($opt_m eq "x") {
 
 if ($opt_m eq "t") {
 	my $path = $ARGV[0];
-	my $res = get('api/bus/objects/'.$path,
+	my $content = get('api/bus/objects/'.$path,
 		{ });
-	print "test res: ".Dumper($res);
+	print "test res: ".Dumper($content);
 	exit(0);
 }
 if ($opt_m eq "d") {
 	my $path = $ARGV[0];
-	my $res = delo($path);
-	#print "del res: ".Dumper($res);
+	my $content = delo($path);
 	exit(0);
 }
 if ($opt_m eq "l") {
 	my $path = $ARGV[0];
-	my $res = listo($path, "");
+	my $content = listo($path, "");
 
 	exit(0);
 }
 if ($opt_m eq "alerts") {
 	my $call = 'api/bus/alerts';
 	#$call .= "?offset=0&limit=10";
-	my $res = get($call, { });
-	print "alerts: ".Dumper($res);
+	my $content = get($call);
+	printf "i/w/e/c = %d/%d/%d/%d\n",
+		$content->{totals}->{info},
+		$content->{totals}->{warning},
+		$content->{totals}->{error},
+		$content->{totals}->{info};
+	#print "alerts: ".Dumper($content);
+	for my $alert ( @{ $content->{alerts} } ) {
+		fmt_alert($alert);
+	}
+	exit(0);
+}
+if ($opt_m =~ /^alerts.prune(.*)$/) {
+	my $severity = $1;
+	printf "\nLooking for severity '%s'\n", $severity;
+	print "Booh here I am with opt_m = ".$opt_m."\n";
+	my $offset = 0;
+	my $limit = 2048;
+	_more_alerts:
+	my $ids = [ ];
+	my $data = { limit => $limit, offset => $offset };
+	my $content = get('api/bus/alerts', $data);
+	if (!defined $content->{alerts}) {
+		#print "No content->{alerts} hmm..\n";
+		#print "content = ".Dumper($content);
+		#print "res = ".Dumper($gv->{lastres});
+		#die "If I search for alerts and find no alerts are there alerts?";
+		exit(0);
+	}
+	printf "i/w/e/c = %d/%d/%d/%d\n",
+		$content->{totals}->{info},
+		$content->{totals}->{warning},
+		$content->{totals}->{error},
+		$content->{totals}->{info};
+	my @alerts = @{ $content->{alerts} };
+	#for my $alert ( grep { $_->{severity} eq $severity } @alerts ) {
+	for my $alert ( @alerts ) {
+		fmt_alert($alert);
+		if ($alert->{severity} eq $severity) {
+			printf "id %s matched %s\n", $alert->{id}, $alert->{severity};
+			push @$ids, $alert->{id};
+		}
+	}
+	my @foo = @$ids;
+	if (@foo) {
+		my $dcontent = post('api/bus/alerts/dismiss', $ids);
+		print "alerts/dismiss ".$severity."[".($#foo+1)."]: ".Dumper($dcontent)."\n";
+	} else {
+		print "No $severity to dis-miss\n";
+	}
+	if ($content->{hasMore} == JSON::true) {
+		$offset += $#alerts+1 - ($#foo+1);
+		goto _more_alerts;
+	}
 	exit(0);
 }
 
@@ -430,22 +481,21 @@ sub dequeue {
 }
 sub upload_block {
 	my ($block_hash, $block_data) = @_;
-	my $res = head('api/worker/objects/hashes/'.$block_hash);
-	if ($res->is_success) {
+	my $content = head('api/worker/objects/hashes/'.$block_hash);
+	if ($gv->{lastres}->is_success) {
 		if ($v>0) {
 			print " found $block_hash, not re-uploading\n";
 		}
 		# XXX ? $res->header( 'last-modified' ) # 'Tue, 18 Jun 2024 06:59:03 GMT'
 		# XXX ? $res->header( 'etag' ) # '"ec7d3a3630bd9e4ef2a39769b781f761"'
 		# if size differs, don't say success
-		if ($res->header( 'content-length' ) == length($block_data)) {
+		if ($gv->{lastres}->header( 'content-length' ) == length($block_data)) {
 			return 1;
 		}
 	}
-	$res = put('api/worker/objects/hashes/'.$block_hash,
-		$block_data);
-	if (!$res->is_success) {
-		warn "Failed to upload $block_hash: ".$res->status_line;
+	$content = put('api/worker/objects/hashes/'.$block_hash, $block_data);
+	if (!$gv->{lastres}->is_success) {
+		warn "Failed to upload $block_hash: ".$gv->{lastres}->status_line;
 		return 0;
 	}
 	if ($v>0) {
@@ -543,6 +593,7 @@ sub del {
 }
 sub _call {
 	my ($type, $cmd, $data) = @_;
+	printf "%s %s %s\n", $type, $cmd, Dumper($data);
 	my $port = $gv->{renterport};
 	my $auth = $gv->{AUTH};
 	my $bucket = $gv->{renterbucket};
@@ -580,8 +631,29 @@ sub _call {
 	}
 
 	my $res = $ua->request($req);
-	#print Dumper($res);
-	#exit(0);
+	$gv->{lastres} = $res;
+	my $ret = $res->decoded_content;
+	if ($res->is_success) {
+		my $cl = $res->header( 'content-length' );
+		if (defined $cl && $res->header( 'content-length' ) eq '0') {
+			return $ret;
+		}
+		my $ct = $res->header( 'content-type' );
+		if (!defined $ct) {
+			print "no content-type header? hrm...\n";
+			print Dumper($res);
+			die "Bombs away!";
+		}
+		if ($res->header( 'content-type' ) eq 'application/json') {
+			my $json = $gv->{JSON}->decode($ret);
+			return $json;
+		}
+		if ($res->header( 'content-type' ) =~ /^text\/plain/) {
+			return $ret;
+		}
+		print STDERR "Unhandled content-type: ".$res->header( 'content-type' )."\n";
+		return $ret;
+	}
 	return $res;
 }
 
@@ -613,7 +685,7 @@ sub db_init {
 
 sub fmt_objects {
 	my ($objects) = @_;
-	my $hidehealth = 0.7;
+	my $hidehealth = 0.1;
 	for my $o (@{ $objects->{objects} }) {
 		if ($o->{health} > $hidehealth) {
 			next;
@@ -627,6 +699,7 @@ sub fmt_objects {
 }
 sub listo {
 	my ($p, $n) = @_;
+	my $minhealth = -0.2;
 
 	$p //= "";
 	$p =~ s/^\///;
@@ -635,18 +708,17 @@ sub listo {
 	}
 	my @next = ("");
 	my $ncount = 0;
-	my $res;
+	my $recursedir = 1;
+	my $recjson;
+	if ($recursedir > 0) {
+		$recjson = JSON::true;
+	} else {
+		$recjson = JSON::false;
+	}
 	_recurse:
 	#printf "ncount %d vs nextcount %d\n", $ncount, $#next;
 	while ($ncount <= $#next) {
 		my $n = $next[$ncount++];
-		my $recursedir = 1;
-		my $recjson;
-		if ($recursedir > 0) {
-			$recjson = JSON::true;
-		} else {
-			$recjson = JSON::false;
-		}
 		my $parms = {
 			"limit" => 2048,
 			"prefix" => $p,
@@ -659,15 +731,15 @@ sub listo {
 			"marker" => $n,
 		};
 		my $call = 'api/bus/objects/';
-		$res = get($call, $parms);
-		#print "post res: ".Dumper($res);
-		my $content = $res->{_content};
-		if ($content =~ /^<.xml version=/) {
-			die "Ooops... $content";
+		my $content = get($call, $parms);
+		if (ref($content) eq "") {
+			if ($content =~ /^<.xml version=/) {
+				die "Ooops... $content";
+			}
+			die "Unhandled... $content";
 		}
-		my $objects = JSON->new->utf8->decode($res->{_content});
+		my $objects = $content;
 		fmt_objects($objects);
-		my $minhealth = -0.5;
 		for my $o (@{ $objects->{objects} }) {
 			if ($o->{health} < $minhealth) {
 				delo($o->{key});
@@ -679,7 +751,7 @@ sub listo {
 			push @next, $objects->{nextMarker};
 			goto _recurse;
 		}
-		return $res;
+		return $content;
 	}
 }
 sub delo {
@@ -688,7 +760,14 @@ sub delo {
 	$path =~ s/^\///;
 
 	printf "D %s", $path;
-	my $res = del('api/bus/object/'.$path);
-	print " ".$res->{_msg}."\n";
-	return $res;
+	my $content = del('api/bus/object/'.$path);
+	print " ".$gv->{lastres}->{_msg}."\n";
+	return $content;
+}
+sub fmt_alert {
+	my ($a) = @_;
+	printf "%s %s %s %s\n", $a->{severity}, $a->{timestamp}, $a->{id}, $a->{message};
+	for my $d (sort keys %{ $a->{data} }) {
+		printf "        %s = %s\n", $d, $a->{data}->{$d};
+	}
 }
