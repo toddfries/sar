@@ -185,7 +185,7 @@ if ($opt_m eq "d") {
 }
 if ($opt_m eq "l") {
 	my $path = $ARGV[0];
-	my $content = listo($path, "");
+	my $content = listo($path, 0);
 
 	exit(0);
 }
@@ -593,7 +593,6 @@ sub del {
 }
 sub _call {
 	my ($type, $cmd, $data) = @_;
-	printf "%s %s %s\n", $type, $cmd, Dumper($data);
 	my $port = $gv->{renterport};
 	my $auth = $gv->{AUTH};
 	my $bucket = $gv->{renterbucket};
@@ -610,8 +609,12 @@ sub _call {
 		$atype = 'application/json';
 	}
 	$parms->{bucket} = $gv->{renterbucket};
+	#printf "_call %s %s %s\n", $type, $cmd, Dumper($parms);
 	my $str = "";
 	for my $var (keys %{ $parms }) {
+		if (!defined $parms->{$var}) {
+			next;
+		}
 		if (length($str) < 1) {
 			$str=$str."?${var}=".$parms->{$var};
 			next;
@@ -619,6 +622,7 @@ sub _call {
 		$str=$str."&${var}=".$parms->{$var};
 	}
 	$url .= $str;
+	#printf "_call url=%s\n", $url;
 	my $req;
 
 	my $header = [ 'Content-Type' => $atype,
@@ -686,27 +690,43 @@ sub db_init {
 sub fmt_objects {
 	my ($objects) = @_;
 	my $hidehealth = 0.1;
-	for my $o (@{ $objects->{objects} }) {
+	my @olist;
+	if (defined $objects->{objects}) {
+		@olist = @{ $objects->{objects} };
+	} elsif (defined $objects->{entries}) {
+		# pre 2.x api
+		@olist = @{ $objects->{entries} };
+	}
+	for my $o (@olist) {
 		if ($o->{health} > $hidehealth) {
 			next;
+		}
+		# pre 2.x api
+		if (!defined $o->{key}) {
+			$o->{key} = $o->{name};
 		}
 		printf "%5f %12d %s%s\n",
 			$o->{health},
 			$o->{size},
-			$o->{bucket},
+			$gv->{renterbucket},
 			$o->{key};
 	}
 }
 sub listo {
 	my ($p, $n) = @_;
 	my $minhealth = -0.2;
+	my $olimit = 256;
 
-	$p //= "";
+	if (!defined $p) {
+		$p = "";
+	}
 	$p =~ s/^\///;
 	if (! ($p =~ /\/$/)) {
 		$p .= "/";
+		if ($p eq "/") {
+			$p = "";
+		}
 	}
-	my @next = ("");
 	my $ncount = 0;
 	my $recursedir = 1;
 	my $recjson;
@@ -716,19 +736,16 @@ sub listo {
 		$recjson = JSON::false;
 	}
 	_recurse:
-	#printf "ncount %d vs nextcount %d\n", $ncount, $#next;
-	while ($ncount <= $#next) {
-		my $n = $next[$ncount++];
+	while (1) {
 		my $parms = {
-			"limit" => 2048,
+			"limit" => 256,
 			"prefix" => $p,
-			"marker" => "",
 			"recursive" => $recjson,
 			"delimiter" => "",
 			"sortby" => "",
 			"sortdir" => "",
 			"substring" => "",
-			"marker" => $n,
+			"offset" => $n,
 		};
 		my $call = 'api/bus/objects/';
 		my $content = get($call, $parms);
@@ -738,17 +755,28 @@ sub listo {
 			}
 			die "Unhandled... $content";
 		}
+		#print "listo content=".Dumper($content);
 		my $objects = $content;
 		fmt_objects($objects);
-		for my $o (@{ $objects->{objects} }) {
+		my @olist;
+		if (defined $objects->{objects}) {
+			@olist = @{ $objects->{objects} };
+		} elsif (defined $objects->{entries}) {
+			@olist = @{ $objects->{entries} };
+		}
+		my $delcount = 0;
+		for my $o (@olist) {
 			if ($o->{health} < $minhealth) {
+				# pre 2.x api
+				if (!defined $o->{key}) {
+					$o->{key} = $o->{name};
+				}
 				delo($o->{key});
+				$delcount++;
 			}
 		}
-		#printf "next: listo(%s, %s);\n", $p, $objects->{nextMarker};
-		#print "hasMore is ".Dumper($objects->{hasMore});
 		if ($objects->{hasMore} == JSON::true) {
-			push @next, $objects->{nextMarker};
+			$n += $#olist + 1 - $delcount;
 			goto _recurse;
 		}
 		return $content;
