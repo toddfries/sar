@@ -775,7 +775,8 @@ sub listo {
 				$delcount++;
 			}
 		}
-		if ($objects->{hasMore} == JSON::true) {
+		if (defined $objects->{hasMore} &&
+			$objects->{hasMore} == JSON::true) {
 			$n += $#olist + 1 - $delcount;
 			goto _recurse;
 		}
@@ -787,9 +788,19 @@ sub delo {
 
 	$path =~ s/^\///;
 
+	# can't remove dirs
+	if ($path =~ /\/$/) {
+		return;
+	}
+
 	printf "D %s", $path;
 	my $content = del('api/bus/object/'.$path);
 	print " ".$gv->{lastres}->{_msg}."\n";
+	if ($gv->{lastres}->{_msg} eq "Not Found") {
+		print "api/bus/object/$path:\n";
+		print Dumper($content);
+		exit(0);
+	}
 	return $content;
 }
 sub fmt_alert {
